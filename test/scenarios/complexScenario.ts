@@ -1,6 +1,6 @@
 import { time } from '@nomicfoundation/hardhat-toolbox/network-helpers'
 import hardhat, { ethers } from 'hardhat'
-import { getStakingContractsWithStakersAndRewards } from '../_.fixtures'
+import { getStakingContractsWithStakersAndRewards } from '../Staking/_.fixtures'
 import { expect } from 'chai'
 import { StakingCustomDuration } from '../../typechain-types'
 

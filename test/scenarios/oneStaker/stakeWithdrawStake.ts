@@ -1,6 +1,6 @@
 import { time } from '@nomicfoundation/hardhat-toolbox/network-helpers'
 import { ethers } from 'hardhat'
-import { getStakingContractWithStakers } from '../../_.fixtures'
+import { getStakingContractWithStakers } from '../../Staking/_.fixtures'
 import { expect } from 'chai'
 
 // TODO: ADD a lot of stakes at the same time
