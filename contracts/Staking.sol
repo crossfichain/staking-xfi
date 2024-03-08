@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 
-pragma solidity 0.8.19;
+pragma solidity ^0.8.19;
 
 import '@openzeppelin/contracts/access/Ownable.sol';
 import '@openzeppelin/contracts/utils/math/Math.sol';
@@ -10,7 +10,7 @@ import '@openzeppelin/contracts/security/ReentrancyGuard.sol';
 
 /// @title Complicated staking contract
 /// @author Monty C. Python
-contract Staking is Ownable, ReentrancyGuard {
+contract Staking is Ownable, ReentrancyGuard, ERC20 {
 	using SafeERC20 for IERC20;
 
 	/* ========== CONSTANTS ========== */
@@ -61,7 +61,13 @@ contract Staking is Ownable, ReentrancyGuard {
 
 	/* ========== CONSTRUCTOR ========== */
 
-	constructor(address _rewardsDistribution, address _rewardsToken, address _stakingToken) {
+	constructor(
+		address _rewardsDistribution,
+		address _rewardsToken,
+		address _stakingToken,
+		string memory _name,
+		string memory _symbol
+	) ERC20(_name, _symbol) {
 		rewardsToken = IERC20(_rewardsToken);
 		stakingToken = IERC20(_stakingToken);
 		transferOwnership(_rewardsDistribution);
@@ -153,6 +159,7 @@ contract Staking is Ownable, ReentrancyGuard {
 		require(amount != 0, 'Cannot stake 0');
 
 		stakingToken.safeTransferFrom(msg.sender, address(this), amount);
+		_mint(msg.sender, amount);
 
 		amount *= AMOUNT_MULTIPLIER;
 		userVariables[msg.sender].balanceLP += amount;
@@ -179,6 +186,8 @@ contract Staking is Ownable, ReentrancyGuard {
 
 	function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
 		require(amount != 0, 'Cannot withdraw 0');
+		require(balanceOf(msg.sender) >= amount, 'No staked tokens on balance');
+		_burn(msg.sender, amount);
 
 		UserVariables storage variables = userVariables[msg.sender];
 
@@ -230,7 +239,11 @@ contract Staking is Ownable, ReentrancyGuard {
 	function compoundBP() external updateReward(msg.sender) {}
 
 	/// @notice returns data about user rewards for front-end, supposed to be called via staticCall
-	function getUserData() external updateReward(msg.sender) returns (uint256, uint256, uint256, uint256, uint256) {
+	function getUserData()
+		external
+		updateReward(msg.sender)
+		returns (uint256, uint256, uint256, uint256, uint256, uint256)
+	{
 		UserVariables storage userCurrentVariables = userVariables[msg.sender];
 
 		return (
@@ -238,7 +251,8 @@ contract Staking is Ownable, ReentrancyGuard {
 			userCurrentVariables.balanceBP / AMOUNT_MULTIPLIER,
 			userCurrentVariables.balanceNC / AMOUNT_MULTIPLIER,
 			userCurrentVariables.balanceST / AMOUNT_MULTIPLIER,
-			userCurrentVariables.balanceVST / AMOUNT_MULTIPLIER
+			userCurrentVariables.balanceVST / AMOUNT_MULTIPLIER,
+			userVariables[msg.sender].rewards / AMOUNT_MULTIPLIER
 		);
 	}
 
@@ -295,7 +309,7 @@ contract Staking is Ownable, ReentrancyGuard {
 
 		if (_totalSupplyLP != 0) {
 			_totalSupplyST +=
-				(lastTimeNativeRewardApplicable() - Math.min(lastTimeNativeRewardApplicable(), lastNativeUpdateTime)) *
+				(_lastTimeNativeRewardApplicable - Math.min(_lastTimeNativeRewardApplicable, lastNativeUpdateTime)) *
 				nativeRewardRate;
 		}
 
