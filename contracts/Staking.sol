@@ -7,10 +7,11 @@ import '@openzeppelin/contracts/utils/math/Math.sol';
 import '@openzeppelin/contracts/token/ERC20/ERC20.sol';
 import '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
 import '@openzeppelin/contracts/security/ReentrancyGuard.sol';
-import '@openzeppelin/contracts/security/Pausable.sol'; // Added for emergency controls
+import '@openzeppelin/contracts/security/Pausable.sol';
 
-/// @title Complicated staking contract
-/// @author Monty C. Python
+/// @title Staking contract for CrossFi platform
+/// @notice Handles staking, rewards distribution, and vesting with multiple reward types
+/// @dev Combines ERC20 functionality with staking mechanisms
 contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 	using SafeERC20 for IERC20;
 
@@ -35,8 +36,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 	IERC20 public immutable stakingToken;
 	IERC20 public immutable rewardsToken;
 
-	uint256 public tokenPeriodFinish; // finish of tokens earning
-	uint256 public tokenRewardRate; // how many tokens are given to pool every second
+	uint256 public tokenPeriodFinish;
+	uint256 public tokenRewardRate;
 	uint256 public tokenRewardsDuration = 60 days;
 
 	uint256 public nativePeriodFinish;
@@ -67,10 +68,16 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 	uint256 public _totalSupplyST;
 
 	uint256 public nativeMultiplierStored = INIT_MULTIPLIER_VALUE;
-	uint256 public tokenMultiplierStored = INIT_MULTIPLIER_VALUE; // Fixed: Initialize to same value as nativeMultiplierStored
+	uint256 public tokenMultiplierStored = INIT_MULTIPLIER_VALUE;
 
 	/* ========== CONSTRUCTOR ========== */
 
+	/// @notice Sets up the staking contract with tokens and ownership
+	/// @param _rewardsDistribution Address that will own the contract
+	/// @param _rewardsToken Address of the token used for rewards
+	/// @param _stakingToken Address of the token that can be staked
+	/// @param _name Name for the staking token receipt
+	/// @param _symbol Symbol for the staking token receipt
 	constructor(
 		address _rewardsDistribution,
 		address _rewardsToken,
@@ -88,26 +95,41 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 
 	/* ========== VIEWS FOR EXTERNAL USE ========== */
 
+	/// @notice Returns the bonus points balance of an account
+	/// @param account Address to check
+	/// @return Bonus points balance
 	function balanceBPOf(address account) external view returns (uint256) {
 		return userVariables[account].balanceBP / AMOUNT_MULTIPLIER;
 	}
 
+	/// @notice Returns the LP balance of an account
+	/// @param account Address to check
+	/// @return LP balance
 	function balanceLPOf(address account) external view returns (uint256) {
 		return userVariables[account].balanceLP / AMOUNT_MULTIPLIER;
 	}
 
+	/// @notice Returns the ST balance of an account
+	/// @param account Address to check
+	/// @return ST balance
 	function balanceSTOf(address account) external view returns (uint256) {
 		return userVariables[account].balanceST / AMOUNT_MULTIPLIER;
 	}
 
+	/// @notice Returns the total supply of LP tokens
+	/// @return Total LP supply
 	function totalSupplyLP() external view returns (uint256) {
 		return _totalSupplyLP / AMOUNT_MULTIPLIER;
 	}
 
+	/// @notice Returns the total supply of BP tokens
+	/// @return Total BP supply
 	function totalSupplyBP() external view returns (uint256) {
 		return _totalSupplyBP / AMOUNT_MULTIPLIER;
 	}
 
+	/// @notice Returns the total supply of ST tokens
+	/// @return Total ST supply
 	function totalSupplyST() external view returns (uint256) {
 		return _totalSupplyST / AMOUNT_MULTIPLIER;
 	}
@@ -139,6 +161,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 		return nativeMultiplierStored + (nativeMultiplierStored * timeDiff * nativeRewardRate) / totalShares;
 	}
 
+	/// @notice Calculates the current token multiplier value
+	/// @return Current token multiplier value
 	function getTokenMultiplier() public view returns (uint256) {
 		if (_totalSupplyLP + _totalSupplyST + _totalSupplyBP == 0) {
 			return tokenMultiplierStored;
@@ -147,10 +171,12 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 		uint256 timeDiff = lastTimeTokenRewardApplicable() - lastTokenUpdateTime;
 		uint256 totalShares = _totalSupplyLP + _totalSupplyBP + _totalSupplyST;
 
-		// Fixed: Using tokenMultiplierStored instead of nativeMultiplierStored
 		return tokenMultiplierStored + (tokenMultiplierStored * timeDiff * tokenRewardRate) / totalShares;
 	}
 
+	/// @notice Calculates token rewards earned by an account
+	/// @param account Address to calculate rewards for
+	/// @return Amount of token rewards earned
 	function tokenEarned(address account) internal view returns (uint256) {
 		UserVariables storage variables = userVariables[account];
 
@@ -161,6 +187,9 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 		return (userShares * multiplierDiff) / divider;
 	}
 
+	/// @notice Calculates native rewards earned by an account
+	/// @param account Address to calculate rewards for
+	/// @return Amount of native rewards earned
 	function nativeEarned(address account) internal view returns (uint256) {
 		UserVariables storage variables = userVariables[account];
 
@@ -274,14 +303,11 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 	function compoundBP() external updateReward(msg.sender) {
 		UserVariables storage variables = userVariables[msg.sender];
 		
-		// Reinvest bonus points back into LP balance
 		uint256 bonusPoints = variables.balanceBP;
 		if (bonusPoints > 0) {
-			// Convert bonus points to LP tokens
 			variables.balanceLP += bonusPoints;
 			_totalSupplyLP += bonusPoints;
 			
-			// Reset bonus points
 			variables.balanceBP = 0;
 			_totalSupplyBP -= bonusPoints;
 			
@@ -289,7 +315,9 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 		}
 	}
 
-	/// @notice returns data about user rewards for front-end, supposed to be called via staticCall
+	/// @notice Returns data about user rewards for front-end
+	/// @dev Should be called via staticCall
+	/// @return LP balance, BP balance, NC balance, ST balance, VST balance, and rewards
 	function getUserData()
 		external
 		updateReward(msg.sender)
@@ -307,6 +335,7 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 		);
 	}
 
+	/// @notice Withdraws staked tokens and claims rewards in one transaction
 	function exit() external {
 		withdraw(userVariables[msg.sender].balanceLP / AMOUNT_MULTIPLIER);
 		getReward();
@@ -334,6 +363,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 
 	/* ========== RESTRICTED FUNCTIONS ========== */
 
+	/// @notice Notifies the contract that token rewards have been added
+	/// @param reward Amount of token rewards to distribute
 	function notifyTokenRewardAmount(uint256 reward) external onlyOwner updateReward(address(0)) {
 		if (block.timestamp >= tokenPeriodFinish) {
 			tokenRewardRate = (reward * AMOUNT_MULTIPLIER) / tokenRewardsDuration;
@@ -352,8 +383,9 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 		emit TokenRewardAdded(reward);
 	}
 
+	/// @notice Notifies the contract that native rewards have been added
+	/// @param amount Amount of native token rewards to distribute
 	function notifyNativeRewardAmount(uint256 amount) external payable onlyOwner updateReward(address(0)) {
-		// Verify reward amount matches sent ETH
 		require(msg.value == amount, "Reward amount must match sent value");
 		
 		if (block.timestamp >= nativePeriodFinish) {
@@ -400,6 +432,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 
 	/* ========== MODIFIERS ========== */
 
+	/// @notice Updates reward-related variables before executing a function
+	/// @param account Address to update rewards for
 	modifier updateReward(address account) {
 		UserVariables storage variables = userVariables[account];
 
@@ -428,6 +462,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 		_;
 	}
 
+	/// @notice Updates user-specific variables for rewards
+	/// @param account Address to update
 	function updateUserVariables(address account) internal {
 		UserVariables storage variables = userVariables[account];
 
@@ -438,11 +474,14 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 		variables.userNativeMultiplierPaid = nativeMultiplierStored;
 	}
 
+	/// @notice Updates stored multiplier variables for rewards calculations
 	function updateStoredVariables() internal {
 		tokenMultiplierStored = getTokenMultiplier();
 		nativeMultiplierStored = getNativeMultiplier();
 	}
 
+	/// @notice Updates the bonus points for an account
+	/// @param account Address to update
 	function updateBonusPoints(address account) internal {
 		UserVariables storage variables = userVariables[account];
 
@@ -455,6 +494,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 		variables.balanceBP += increaseOfBP;
 	}
 
+	/// @notice Updates vesting data for an account
+	/// @param account Address to update
 	function updateVesting(address account) internal {
 		UserVariables storage variables = userVariables[account];
 
