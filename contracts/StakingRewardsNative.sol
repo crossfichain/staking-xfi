@@ -3,22 +3,29 @@
 pragma solidity ^0.8.10;
 
 import '@openzeppelin/contracts/utils/math/Math.sol';
-import '@openzeppelin/contracts/utils/math/SafeMath.sol';
 import '@openzeppelin/contracts/access/Ownable.sol';
 import '@openzeppelin/contracts/token/ERC20/ERC20.sol';
 import '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
 import '@openzeppelin/contracts/security/ReentrancyGuard.sol';
+import '@openzeppelin/contracts/security/Pausable.sol'; // Added for emergency controls
 
 // Inheritance
 import './interfaces/IStakingRewards.sol';
 
-contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuard {
-	using SafeMath for uint256;
+contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuard, Pausable {
 	using SafeERC20 for IERC20;
+
+	/* ========== ERRORS ========== */
+	
+	error ZeroAmount();
+	error RewardTooHigh();
+	error NativeTransferFailed();
+	error ZeroAddress();
+	error InvalidRewardAmount(); // Added for input validation
 
 	/* ========== STATE VARIABLES ========== */
 
-	IERC20 public stakingToken;
+	IERC20 public immutable stakingToken; // Made immutable for gas optimization
 
 	uint256 public periodFinish;
 	uint256 public rewardRate;
@@ -35,6 +42,7 @@ contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuar
 	/* ========== CONSTRUCTOR ========== */
 
 	constructor(string memory _name, string memory _symbol, address _stakingToken) ERC20(_name, _symbol) {
+		if (_stakingToken == address(0)) revert ZeroAddress();
 		stakingToken = IERC20(_stakingToken);
 	}
 
@@ -49,27 +57,25 @@ contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuar
 			return rewardPerTokenStored;
 		}
 		return
-			rewardPerTokenStored.add(
-				lastTimeRewardApplicable().sub(lastUpdateTime).mul(rewardRate).mul(1e18).div(totalSupply())
-			);
+			rewardPerTokenStored + 
+				((lastTimeRewardApplicable() - lastUpdateTime) * rewardRate * 1e18) / totalSupply();
 	}
 
 	function earned(address account) public view returns (uint256) {
 		return
-			balanceOf(account).mul(rewardPerToken().sub(userRewardPerTokenPaid[account])).div(1e18).add(
-				rewards[account]
-			);
+			(balanceOf(account) * (rewardPerToken() - userRewardPerTokenPaid[account])) / 1e18 + 
+				rewards[account];
 	}
 
 	function getRewardForDuration() external view returns (uint256) {
-		return rewardRate.mul(rewardsDuration);
+		return rewardRate * rewardsDuration;
 	}
 
 	/* ========== MUTATIVE FUNCTIONS ========== */
 
-	function stake(uint256 amount) external nonReentrant updateReward(msg.sender) {
+	function stake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
 		/* --- INPUT VALIDATION --- */
-		require(amount > 0, 'Cannot stake 0');
+		if (amount == 0) revert ZeroAmount();
 
 		/* --- LOGIC --- */
 		stakingToken.safeTransferFrom(msg.sender, address(this), amount);
@@ -81,7 +87,7 @@ contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuar
 
 	function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
 		/* --- INPUT VALIDATION --- */
-		require(amount > 0, 'Cannot withdraw 0');
+		if (amount == 0) revert ZeroAmount();
 
 		/* --- LOGIC --- */
 		_burn(msg.sender, amount);
@@ -96,8 +102,10 @@ contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuar
 		uint256 reward = rewards[msg.sender];
 		if (reward > 0) {
 			rewards[msg.sender] = 0;
-			payable(msg.sender).transfer(reward);
-			// rewardsToken.safeTransfer(msg.sender, reward);
+			
+			// Use a more secure way to transfer native tokens
+			(bool success, ) = payable(msg.sender).call{value: reward}("");
+			if (!success) revert NativeTransferFailed();
 
 			/* --- EVENT --- */
 			emit RewardPaid(msg.sender, reward);
@@ -109,23 +117,34 @@ contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuar
 		getReward();
 	}
 
+	/// @notice Emergency withdrawal function that bypasses reward updates
+	/// @dev Can be called even when contract is paused, allows users to withdraw without getting rewards
+	function emergencyWithdraw() external nonReentrant {
+		uint256 amount = balanceOf(msg.sender);
+		if (amount > 0) {
+			_burn(msg.sender, amount);
+			stakingToken.safeTransfer(msg.sender, amount);
+			emit EmergencyWithdrawn(msg.sender, amount);
+		}
+	}
+
 	receive() external payable {}
 
 	/* ========== RESTRICTED FUNCTIONS ========== */
 
 	/// @notice Initiates a new period of rewards distribution
-	/// @notice Reward tokens should be transfered to this contract before calling
 	/// @param reward amount of reward tokens to add to distribution
-	/// @dev Reward to distribute can be less than amount transfered to contract
-	/// @dev Can be called after first stakes in contract
-	/// @dev Initializes
+	/// @dev Reward value must exactly match msg.value sent to contract
 	function notifyRewardAmount(uint256 reward) external payable onlyOwner updateReward(address(0)) {
+		// Verify reward amount matches sent ETH
+		if (msg.value != reward) revert InvalidRewardAmount();
+
 		if (block.timestamp >= periodFinish) {
-			rewardRate = reward.div(rewardsDuration);
+			rewardRate = reward / rewardsDuration;
 		} else {
-			uint256 remaining = periodFinish.sub(block.timestamp);
-			uint256 leftover = remaining.mul(rewardRate);
-			rewardRate = reward.add(leftover).div(rewardsDuration);
+			uint256 remaining = periodFinish - block.timestamp;
+			uint256 leftover = remaining * rewardRate;
+			rewardRate = (reward + leftover) / rewardsDuration;
 		}
 
 		// Ensure the provided reward amount is not more than the balance in the contract.
@@ -133,11 +152,30 @@ contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuar
 		// very high values of rewardRate in the earned and rewardsPerToken functions;
 		// Reward + leftover must be less than 2^256 / 10^18 to avoid overflow.
 		uint balance = address(this).balance;
-		require(rewardRate <= balance.div(rewardsDuration), 'Provided reward too high');
+		if (rewardRate > balance / rewardsDuration) revert RewardTooHigh();
 
 		lastUpdateTime = block.timestamp;
-		periodFinish = block.timestamp.add(rewardsDuration);
+		periodFinish = block.timestamp + rewardsDuration;
 		emit RewardAdded(reward);
+	}
+
+	/// @notice Allows owner to update rewards duration for future reward periods
+	/// @param _rewardsDuration New duration in seconds
+	function setRewardsDuration(uint256 _rewardsDuration) external onlyOwner {
+		// Can only be updated if current period has finished
+		require(block.timestamp > periodFinish, "Previous rewards period must be complete");
+		rewardsDuration = _rewardsDuration;
+		emit RewardsDurationUpdated(_rewardsDuration);
+	}
+
+	/// @notice Pauses the contract, preventing staking but allowing withdrawals
+	function pause() external onlyOwner {
+		_pause();
+	}
+
+	/// @notice Unpauses the contract, allowing staking again
+	function unpause() external onlyOwner {
+		_unpause();
 	}
 
 	/* ========== MODIFIERS ========== */
@@ -159,4 +197,6 @@ contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuar
 	event Staked(address indexed user, uint256 amount);
 	event Withdrawn(address indexed user, uint256 amount);
 	event RewardPaid(address indexed user, uint256 reward);
+	event EmergencyWithdrawn(address indexed user, uint256 amount);
+	event RewardsDurationUpdated(uint256 newDuration);
 }

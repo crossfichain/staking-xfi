@@ -7,11 +7,21 @@ import '@openzeppelin/contracts/utils/math/Math.sol';
 import '@openzeppelin/contracts/token/ERC20/ERC20.sol';
 import '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
 import '@openzeppelin/contracts/security/ReentrancyGuard.sol';
+import '@openzeppelin/contracts/security/Pausable.sol'; // Added for emergency controls
 
 /// @title Complicated staking contract
 /// @author Monty C. Python
-contract Staking is Ownable, ReentrancyGuard, ERC20 {
+contract Staking is Ownable, ReentrancyGuard, ERC20, Pausable {
 	using SafeERC20 for IERC20;
+
+	/* ========== ERRORS ========== */
+	
+	error ZeroAmount();
+	error InsufficientBalance();
+	error NativeTransferFailed();
+	error RewardTooHigh();
+	error InsufficientLP();
+	error ZeroAddress();
 
 	/* ========== CONSTANTS ========== */
 
@@ -57,7 +67,7 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 	uint256 public _totalSupplyST;
 
 	uint256 public nativeMultiplierStored = INIT_MULTIPLIER_VALUE;
-	uint256 public tokenMultiplierStored = 0;
+	uint256 public tokenMultiplierStored = INIT_MULTIPLIER_VALUE; // Fixed: Initialize to same value as nativeMultiplierStored
 
 	/* ========== CONSTRUCTOR ========== */
 
@@ -68,6 +78,9 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 		string memory _name,
 		string memory _symbol
 	) ERC20(_name, _symbol) {
+		if (_rewardsToken == address(0) || _stakingToken == address(0) || _rewardsDistribution == address(0)) 
+			revert ZeroAddress();
+			
 		rewardsToken = IERC20(_rewardsToken);
 		stakingToken = IERC20(_stakingToken);
 		transferOwnership(_rewardsDistribution);
@@ -101,14 +114,20 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 
 	/* ========== VIEWS FOR CONTRACT ========== */
 
+	/// @notice Returns the latest time at which token rewards are still applicable
+	/// @return Latest applicable timestamp for token rewards
 	function lastTimeTokenRewardApplicable() public view returns (uint256) {
 		return Math.min(block.timestamp, tokenPeriodFinish);
 	}
 
+	/// @notice Returns the latest time at which native rewards are still applicable
+	/// @return Latest applicable timestamp for native rewards
 	function lastTimeNativeRewardApplicable() public view returns (uint256) {
 		return Math.min(block.timestamp, nativePeriodFinish);
 	}
 
+	/// @notice Calculates the current native multiplier value
+	/// @return Current native multiplier value
 	function getNativeMultiplier() public view returns (uint256) {
 		if (_totalSupplyLP + _totalSupplyST + _totalSupplyBP == 0) {
 			return nativeMultiplierStored;
@@ -128,7 +147,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 		uint256 timeDiff = lastTimeTokenRewardApplicable() - lastTokenUpdateTime;
 		uint256 totalShares = _totalSupplyLP + _totalSupplyBP + _totalSupplyST;
 
-		return tokenMultiplierStored + (nativeMultiplierStored * timeDiff * tokenRewardRate) / totalShares;
+		// Fixed: Using tokenMultiplierStored instead of nativeMultiplierStored
+		return tokenMultiplierStored + (tokenMultiplierStored * timeDiff * tokenRewardRate) / totalShares;
 	}
 
 	function tokenEarned(address account) internal view returns (uint256) {
@@ -155,8 +175,11 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 
 	/* ========== MUTATIVE FUNCTIONS ========== */
 
-	function stake(uint256 amount) external nonReentrant updateReward(msg.sender) {
-		require(amount != 0, 'Cannot stake 0');
+	/// @notice Stakes tokens into the contract
+	/// @param amount Amount of tokens to stake
+	/// @dev Tokens are transferred from the user to the contract
+	function stake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
+		if (amount == 0) revert ZeroAmount();
 
 		stakingToken.safeTransferFrom(msg.sender, address(this), amount);
 		_mint(msg.sender, amount);
@@ -168,6 +191,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 		emit Staked(msg.sender, amount / AMOUNT_MULTIPLIER);
 	}
 
+	/// @notice Claims native rewards accumulated by the user
+	/// @dev Native tokens are sent directly to the user's address
 	function getNativeReward() public nonReentrant updateReward(msg.sender) {
 		UserVariables storage variables = userVariables[msg.sender];
 
@@ -178,15 +203,19 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 
 			(bool sent, ) = msg.sender.call{value: reward / AMOUNT_MULTIPLIER}('');
 
-			require(sent, 'Native transfer failed');
+			if (!sent) revert NativeTransferFailed();
 
 			emit NativeRewardPaid(msg.sender, reward / AMOUNT_MULTIPLIER);
 		}
 	}
 
+	/// @notice Withdraws staked tokens from the contract
+	/// @param amount Amount of tokens to withdraw
+	/// @dev Burns user's staking tokens and returns the original tokens
 	function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
-		require(amount != 0, 'Cannot withdraw 0');
-		require(balanceOf(msg.sender) >= amount, 'No staked tokens on balance');
+		if (amount == 0) revert ZeroAmount();
+		if (balanceOf(msg.sender) < amount) revert InsufficientBalance();
+		
 		_burn(msg.sender, amount);
 
 		UserVariables storage variables = userVariables[msg.sender];
@@ -202,6 +231,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 		emit Withdrawn(msg.sender, amount);
 	}
 
+	/// @notice Claims token rewards accumulated by the user
+	/// @dev Token rewards are transferred to the user's address
 	function getReward() public nonReentrant updateReward(msg.sender) {
 		uint256 reward = userVariables[msg.sender].rewards;
 
@@ -213,17 +244,19 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 		}
 	}
 
-	/// @notice if user call this function, his vesting period going to reset
+	/// @notice Converts staking tokens to vesting tokens
+	/// @param amount Amount of tokens to vest
+	/// @dev User's vesting period is reset when this function is called
 	function vest(uint amount) public nonReentrant updateReward(msg.sender) {
 		amount *= AMOUNT_MULTIPLIER;
 
-		require(amount != 0, 'Cannot vest 0');
+		if (amount == 0) revert ZeroAmount();
 
 		UserVariables storage variables = userVariables[msg.sender];
 		uint256 balance = variables.balanceST;
 
-		require(amount <= balance, 'Cannot vest more then balance');
-		require(amount * VESTING_CONST <= variables.balanceLP, 'You should have more staked LP tokens');
+		if (amount > balance) revert InsufficientBalance();
+		if (amount * VESTING_CONST > variables.balanceLP) revert InsufficientLP();
 
 		variables.balanceST -= amount;
 		_totalSupplyST -= amount;
@@ -236,7 +269,25 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 		emit Vesting(msg.sender, amount / AMOUNT_MULTIPLIER);
 	}
 
-	function compoundBP() external updateReward(msg.sender) {}
+	/// @notice Compounds bonus points into LP tokens
+	/// @dev Converts user's accumulated bonus points into additional LP tokens
+	function compoundBP() external updateReward(msg.sender) {
+		UserVariables storage variables = userVariables[msg.sender];
+		
+		// Reinvest bonus points back into LP balance
+		uint256 bonusPoints = variables.balanceBP;
+		if (bonusPoints > 0) {
+			// Convert bonus points to LP tokens
+			variables.balanceLP += bonusPoints;
+			_totalSupplyLP += bonusPoints;
+			
+			// Reset bonus points
+			variables.balanceBP = 0;
+			_totalSupplyBP -= bonusPoints;
+			
+			emit BonusPointsCompounded(msg.sender, bonusPoints / AMOUNT_MULTIPLIER);
+		}
+	}
 
 	/// @notice returns data about user rewards for front-end, supposed to be called via staticCall
 	function getUserData()
@@ -261,6 +312,26 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 		getReward();
 	}
 
+	/// @notice Emergency withdrawal function that bypasses reward updates
+	/// @dev Can be called even when contract is paused
+	function emergencyWithdraw() external nonReentrant {
+		UserVariables storage variables = userVariables[msg.sender];
+		uint256 amount = variables.balanceLP / AMOUNT_MULTIPLIER;
+		
+		if (amount > 0) {
+			_burn(msg.sender, amount);
+			
+			variables.balanceLP = 0;
+			_totalSupplyLP -= amount * AMOUNT_MULTIPLIER;
+			
+			_totalSupplyBP -= variables.balanceBP;
+			variables.balanceBP = 0;
+			
+			stakingToken.safeTransfer(msg.sender, amount);
+			emit EmergencyWithdrawn(msg.sender, amount);
+		}
+	}
+
 	/* ========== RESTRICTED FUNCTIONS ========== */
 
 	function notifyTokenRewardAmount(uint256 reward) external onlyOwner updateReward(address(0)) {
@@ -273,7 +344,7 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 		}
 
 		uint balance = rewardsToken.balanceOf(address(this));
-		require(tokenRewardRate <= (balance * AMOUNT_MULTIPLIER) / tokenRewardsDuration, 'Provided reward too high');
+		if (tokenRewardRate > (balance * AMOUNT_MULTIPLIER) / tokenRewardsDuration) revert RewardTooHigh();
 
 		lastTokenUpdateTime = block.timestamp;
 
@@ -282,6 +353,9 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 	}
 
 	function notifyNativeRewardAmount(uint256 amount) external payable onlyOwner updateReward(address(0)) {
+		// Verify reward amount matches sent ETH
+		require(msg.value == amount, "Reward amount must match sent value");
+		
 		if (block.timestamp >= nativePeriodFinish) {
 			nativeRewardRate = (amount * AMOUNT_MULTIPLIER) / nativeRewardsDuration;
 		} else {
@@ -291,11 +365,37 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 		}
 
 		uint balance = address(this).balance;
-		require(nativeRewardRate <= (balance * AMOUNT_MULTIPLIER) / nativeRewardsDuration, 'Provided reward too high');
+		if (nativeRewardRate > (balance * AMOUNT_MULTIPLIER) / nativeRewardsDuration) revert RewardTooHigh();
 
 		lastNativeUpdateTime = block.timestamp;
 		nativePeriodFinish = block.timestamp + nativeRewardsDuration;
 		emit NativeRewardAdded(amount);
+	}
+
+	/// @notice Sets the duration for token rewards
+	/// @param _duration New duration in seconds
+	function setTokenRewardsDuration(uint256 _duration) external onlyOwner {
+		require(block.timestamp > tokenPeriodFinish, "Previous rewards period must be complete");
+		tokenRewardsDuration = _duration;
+		emit TokenRewardsDurationUpdated(_duration);
+	}
+
+	/// @notice Sets the duration for native rewards
+	/// @param _duration New duration in seconds
+	function setNativeRewardsDuration(uint256 _duration) external onlyOwner {
+		require(block.timestamp > nativePeriodFinish, "Previous rewards period must be complete");
+		nativeRewardsDuration = _duration;
+		emit NativeRewardsDurationUpdated(_duration);
+	}
+
+	/// @notice Pauses the contract, preventing staking but allowing withdrawals
+	function pause() external onlyOwner {
+		_pause();
+	}
+
+	/// @notice Unpauses the contract, allowing staking again
+	function unpause() external onlyOwner {
+		_unpause();
 	}
 
 	/* ========== MODIFIERS ========== */
@@ -346,9 +446,9 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 	function updateBonusPoints(address account) internal {
 		UserVariables storage variables = userVariables[account];
 
-		if (userVariables[account].userLastUpdateTime == 0) return;
+		if (variables.userLastUpdateTime == 0) return;
 
-		uint256 increaseOfBP = ((block.timestamp - userVariables[account].userLastUpdateTime) * variables.balanceLP) /
+		uint256 increaseOfBP = ((block.timestamp - variables.userLastUpdateTime) * variables.balanceLP) /
 			ONE_YEAR_IN_SECS;
 
 		_totalSupplyBP += increaseOfBP;
@@ -358,16 +458,13 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 	function updateVesting(address account) internal {
 		UserVariables storage variables = userVariables[account];
 
-		if (
-			Math.min(block.timestamp, userVariables[account].vestingFinishTime) <
-			userVariables[account].userLastUpdateTime
-		) {
+		if (Math.min(block.timestamp, variables.vestingFinishTime) < variables.userLastUpdateTime) {
 			return;
 		}
 
 		uint256 increaseOfNC = ((Math.min(block.timestamp, variables.vestingFinishTime) -
 			variables.userLastUpdateTime) *
-			Math.min(userVariables[account].balanceVST, variables.balanceLP / VESTING_CONST)) / ONE_YEAR_IN_SECS;
+			Math.min(variables.balanceVST, variables.balanceLP / VESTING_CONST)) / ONE_YEAR_IN_SECS;
 
 		variables.balanceNC += increaseOfNC;
 		variables.balanceVSTStored += increaseOfNC;
@@ -382,4 +479,8 @@ contract Staking is Ownable, ReentrancyGuard, ERC20 {
 	event TokenRewardPaid(address indexed user, uint256 reward);
 	event NativeRewardPaid(address indexed user, uint256 reward);
 	event Vesting(address indexed user, uint256 reward);
+	event BonusPointsCompounded(address indexed user, uint256 amount);
+	event EmergencyWithdrawn(address indexed user, uint256 amount);
+	event TokenRewardsDurationUpdated(uint256 newDuration);
+	event NativeRewardsDurationUpdated(uint256 newDuration);
 }
