@@ -2,208 +2,187 @@
 
 pragma solidity ^0.8.10;
 
-import '@openzeppelin/contracts/utils/math/Math.sol';
-import '@openzeppelin/contracts/access/Ownable.sol';
-import '@openzeppelin/contracts/token/ERC20/ERC20.sol';
-import '@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol';
-import '@openzeppelin/contracts/security/ReentrancyGuard.sol';
-import '@openzeppelin/contracts/security/Pausable.sol';
-
-import './interfaces/IStakingRewards.sol';
+/* ====== EXTERNAL IMPORTS ====== */
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {Pausable} from "@openzeppelin/contracts/security/Pausable.sol";
+import {IStakingRewardsNative} from "./interfaces/IStakingRewardsNative.sol";
 
 /// @title Native token staking rewards contract
 /// @notice Manages staking and reward distribution with native blockchain currency
 /// @dev Implements the IStakingRewards interface with native token rewards
-contract StakingRewardsNative is IStakingRewards, ERC20, Ownable, ReentrancyGuard, Pausable {
-	using SafeERC20 for IERC20;
+contract StakingRewardsNative is IStakingRewardsNative, ERC20, Ownable, ReentrancyGuard, Pausable {
+    using SafeERC20 for IERC20;
 
-	/* ========== ERRORS ========== */
-	
-	error ZeroAmount();
-	error RewardTooHigh();
-	error NativeTransferFailed();
-	error ZeroAddress();
-	error InvalidRewardAmount();
+    /* ======== STATE ======== */
+    IERC20 public immutable stakingToken;
 
-	/* ========== STATE VARIABLES ========== */
+    uint256 public periodFinish;
+    uint256 public rewardRate;
 
-	IERC20 public immutable stakingToken;
+    uint256 public rewardsDuration = 60 days;
+    uint256 public lastUpdateTime;
+    uint256 public rewardPerTokenStored;
 
-	uint256 public periodFinish;
-	uint256 public rewardRate;
+    mapping(address => uint256) public userRewardPerTokenPaid;
+    mapping(address => uint256) public rewards;
 
-	uint256 public rewardsDuration = 60 days;
-	uint256 public lastUpdateTime;
-	uint256 public rewardPerTokenStored;
+    /* ======== MODIFIERS ======== */
 
-	mapping(address => uint256) public userRewardPerTokenPaid;
-	mapping(address => uint256) public rewards;
+    /// @notice Updates rewards before executing a function
+    /// @param account Address to update rewards for
+    modifier updateReward(address account) {
+        rewardPerTokenStored = rewardPerToken();
+        lastUpdateTime = lastTimeRewardApplicable();
 
-	/* ========== CONSTRUCTOR ========== */
+        if (account != address(0)) {
+            rewards[account] = earned(account);
+            userRewardPerTokenPaid[account] = rewardPerTokenStored;
+        }
+        _;
+    }
 
-	/// @notice Initializes the staking contract
-	/// @param _name Name for the staking receipt token
-	/// @param _symbol Symbol for the staking receipt token
-	/// @param _stakingToken Address of the token that can be staked
-	constructor(string memory _name, string memory _symbol, address _stakingToken) ERC20(_name, _symbol) {
-		if (_stakingToken == address(0)) revert ZeroAddress();
-		stakingToken = IERC20(_stakingToken);
-	}
+    /* ======== CONSTRUCTOR AND INIT ======== */
 
-	/* ========== VIEWS ========== */
+    /// @notice Initializes the staking contract
+    /// @param _name Name for the staking receipt token
+    /// @param _symbol Symbol for the staking receipt token
+    /// @param _stakingToken Address of the token that can be staked
+    constructor(string memory _name, string memory _symbol, address _stakingToken) ERC20(_name, _symbol) {
+        if (_stakingToken == address(0)) revert ZeroAddress();
+        stakingToken = IERC20(_stakingToken);
+    }
 
-	/// @notice Returns the last timestamp at which rewards are applicable
-	/// @return The latest timestamp that rewards apply to
-	function lastTimeRewardApplicable() public view returns (uint256) {
-		return Math.min(block.timestamp, periodFinish);
-	}
+    /* ======== EXTERNAL/PUBLIC ======== */
 
-	/// @notice Calculates the reward per token stored
-	/// @return The current reward per token rate
-	function rewardPerToken() public view returns (uint256) {
-		if (totalSupply() == 0) {
-			return rewardPerTokenStored;
-		}
-		return
-			rewardPerTokenStored + 
-				((lastTimeRewardApplicable() - lastUpdateTime) * rewardRate * 1e18) / totalSupply();
-	}
+    /// @notice Stakes tokens in the contract
+    /// @param amount Amount of tokens to stake
+    function stake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
+        if (amount == 0) revert ZeroAmount();
 
-	/// @notice Calculates the rewards earned by an account
-	/// @param account Address to calculate rewards for
-	/// @return Amount of rewards earned
-	function earned(address account) public view returns (uint256) {
-		return
-			(balanceOf(account) * (rewardPerToken() - userRewardPerTokenPaid[account])) / 1e18 + 
-				rewards[account];
-	}
+        stakingToken.safeTransferFrom(msg.sender, address(this), amount);
+        _mint(msg.sender, amount);
 
-	/// @notice Returns the reward amount for the full duration
-	/// @return Total reward for the duration
-	function getRewardForDuration() external view returns (uint256) {
-		return rewardRate * rewardsDuration;
-	}
+        emit Staked(msg.sender, amount);
+    }
 
-	/* ========== MUTATIVE FUNCTIONS ========== */
+    /// @notice Withdraws staked tokens
+    /// @param amount Amount of tokens to withdraw
+    function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
+        if (amount == 0) revert ZeroAmount();
 
-	/// @notice Stakes tokens in the contract
-	/// @param amount Amount of tokens to stake
-	function stake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
-		if (amount == 0) revert ZeroAmount();
+        _burn(msg.sender, amount);
+        stakingToken.safeTransfer(msg.sender, amount);
 
-		stakingToken.safeTransferFrom(msg.sender, address(this), amount);
-		_mint(msg.sender, amount);
+        emit Withdrawn(msg.sender, amount);
+    }
 
-		emit Staked(msg.sender, amount);
-	}
+    /// @notice Claims available rewards
+    function getReward() public nonReentrant updateReward(msg.sender) {
+        uint256 reward = rewards[msg.sender];
+        if (reward > 0) {
+            rewards[msg.sender] = 0;
 
-	/// @notice Withdraws staked tokens
-	/// @param amount Amount of tokens to withdraw
-	function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
-		if (amount == 0) revert ZeroAmount();
+            (bool success,) = payable(msg.sender).call{value: reward}("");
+            if (!success) revert NativeTransferFailed();
 
-		_burn(msg.sender, amount);
-		stakingToken.safeTransfer(msg.sender, amount);
+            emit RewardPaid(msg.sender, reward);
+        }
+    }
 
-		emit Withdrawn(msg.sender, amount);
-	}
+    /// @notice Withdraws tokens and claims rewards in a single transaction
+    function exit() external {
+        withdraw(balanceOf(msg.sender));
+        getReward();
+    }
 
-	/// @notice Claims available rewards
-	function getReward() public nonReentrant updateReward(msg.sender) {
-		uint256 reward = rewards[msg.sender];
-		if (reward > 0) {
-			rewards[msg.sender] = 0;
-			
-			(bool success, ) = payable(msg.sender).call{value: reward}("");
-			if (!success) revert NativeTransferFailed();
+    /// @notice Emergency withdrawal function that bypasses reward updates
+    /// @dev Can be called even when contract is paused, allows users to withdraw without getting rewards
+    function emergencyWithdraw() external nonReentrant {
+        uint256 amount = balanceOf(msg.sender);
+        if (amount > 0) {
+            _burn(msg.sender, amount);
+            stakingToken.safeTransfer(msg.sender, amount);
+            emit EmergencyWithdrawn(msg.sender, amount);
+        }
+    }
 
-			emit RewardPaid(msg.sender, reward);
-		}
-	}
+    /* ======== ADMIN ======== */
 
-	/// @notice Withdraws tokens and claims rewards in a single transaction
-	function exit() external {
-		withdraw(balanceOf(msg.sender));
-		getReward();
-	}
+    /// @notice Initiates a new period of rewards distribution
+    /// @param reward Amount of reward tokens to distribute
+    /// @dev Reward value must exactly match msg.value sent to contract
+    function notifyRewardAmount(uint256 reward) external payable onlyOwner updateReward(address(0)) {
+        if (msg.value != reward) revert InvalidRewardAmount();
 
-	/// @notice Emergency withdrawal function that bypasses reward updates
-	/// @dev Can be called even when contract is paused, allows users to withdraw without getting rewards
-	function emergencyWithdraw() external nonReentrant {
-		uint256 amount = balanceOf(msg.sender);
-		if (amount > 0) {
-			_burn(msg.sender, amount);
-			stakingToken.safeTransfer(msg.sender, amount);
-			emit EmergencyWithdrawn(msg.sender, amount);
-		}
-	}
+        if (block.timestamp >= periodFinish) {
+            rewardRate = reward / rewardsDuration;
+        } else {
+            uint256 remaining = periodFinish - block.timestamp;
+            uint256 leftover = remaining * rewardRate;
+            rewardRate = (reward + leftover) / rewardsDuration;
+        }
 
-	/// @notice Allows the contract to receive native tokens
-	receive() external payable {}
+        uint256 balance = address(this).balance;
+        if (rewardRate > balance / rewardsDuration) revert RewardTooHigh();
 
-	/* ========== RESTRICTED FUNCTIONS ========== */
+        lastUpdateTime = block.timestamp;
+        periodFinish = block.timestamp + rewardsDuration;
+        emit RewardAdded(reward);
+    }
 
-	/// @notice Initiates a new period of rewards distribution
-	/// @param reward Amount of reward tokens to distribute
-	/// @dev Reward value must exactly match msg.value sent to contract
-	function notifyRewardAmount(uint256 reward) external payable onlyOwner updateReward(address(0)) {
-		if (msg.value != reward) revert InvalidRewardAmount();
+    /// @notice Updates the rewards duration for future reward periods
+    /// @param _rewardsDuration New duration in seconds
+    function setRewardsDuration(uint256 _rewardsDuration) external onlyOwner {
+        if (block.timestamp <= periodFinish) revert IncompletePrevRewardsPeriod();
+        rewardsDuration = _rewardsDuration;
+        emit RewardsDurationUpdated(_rewardsDuration);
+    }
 
-		if (block.timestamp >= periodFinish) {
-			rewardRate = reward / rewardsDuration;
-		} else {
-			uint256 remaining = periodFinish - block.timestamp;
-			uint256 leftover = remaining * rewardRate;
-			rewardRate = (reward + leftover) / rewardsDuration;
-		}
+    /// @notice Pauses the contract, preventing staking but allowing withdrawals
+    function pause() external onlyOwner {
+        _pause();
+    }
 
-		uint balance = address(this).balance;
-		if (rewardRate > balance / rewardsDuration) revert RewardTooHigh();
+    /// @notice Unpauses the contract, allowing staking again
+    function unpause() external onlyOwner {
+        _unpause();
+    }
 
-		lastUpdateTime = block.timestamp;
-		periodFinish = block.timestamp + rewardsDuration;
-		emit RewardAdded(reward);
-	}
+    /* ======== VIEW ======== */
 
-	/// @notice Updates the rewards duration for future reward periods
-	/// @param _rewardsDuration New duration in seconds
-	function setRewardsDuration(uint256 _rewardsDuration) external onlyOwner {
-		require(block.timestamp > periodFinish, "Previous rewards period must be complete");
-		rewardsDuration = _rewardsDuration;
-		emit RewardsDurationUpdated(_rewardsDuration);
-	}
+    /// @notice Returns the last timestamp at which rewards are applicable
+    /// @return The latest timestamp that rewards apply to
+    function lastTimeRewardApplicable() public view returns (uint256) {
+        return Math.min(block.timestamp, periodFinish);
+    }
 
-	/// @notice Pauses the contract, preventing staking but allowing withdrawals
-	function pause() external onlyOwner {
-		_pause();
-	}
+    /// @notice Calculates the reward per token stored
+    /// @return The current reward per token rate
+    function rewardPerToken() public view returns (uint256) {
+        if (totalSupply() == 0) {
+            return rewardPerTokenStored;
+        }
+        return
+            rewardPerTokenStored + ((lastTimeRewardApplicable() - lastUpdateTime) * rewardRate * 1e18) / totalSupply();
+    }
 
-	/// @notice Unpauses the contract, allowing staking again
-	function unpause() external onlyOwner {
-		_unpause();
-	}
+    /// @notice Calculates the rewards earned by an account
+    /// @param account Address to calculate rewards for
+    /// @return Amount of rewards earned
+    function earned(address account) public view returns (uint256) {
+        return (balanceOf(account) * (rewardPerToken() - userRewardPerTokenPaid[account])) / 1e18 + rewards[account];
+    }
 
-	/* ========== MODIFIERS ========== */
+    /// @notice Returns the reward amount for the full duration
+    /// @return Total reward for the duration
+    function getRewardForDuration() external view returns (uint256) {
+        return rewardRate * rewardsDuration;
+    }
 
-	/// @notice Updates rewards before executing a function
-	/// @param account Address to update rewards for
-	modifier updateReward(address account) {
-		rewardPerTokenStored = rewardPerToken();
-		lastUpdateTime = lastTimeRewardApplicable();
-
-		if (account != address(0)) {
-			rewards[account] = earned(account);
-			userRewardPerTokenPaid[account] = rewardPerTokenStored;
-		}
-		_;
-	}
-
-	/* ========== EVENTS ========== */
-
-	event RewardAdded(uint256 reward);
-	event Staked(address indexed user, uint256 amount);
-	event Withdrawn(address indexed user, uint256 amount);
-	event RewardPaid(address indexed user, uint256 reward);
-	event EmergencyWithdrawn(address indexed user, uint256 amount);
-	event RewardsDurationUpdated(uint256 newDuration);
+    /// @notice Allows the contract to receive native tokens
+    receive() external payable {}
 }
