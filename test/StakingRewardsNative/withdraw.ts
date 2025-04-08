@@ -22,11 +22,10 @@ export const withdraw = function () {
 	})
 
 	it('amount must be greater than 0', async function () {
-		const { staking, signers } = await getStakingContractsWithStakersAndRewards()
+		const { staking } = await getStakingContractsWithStakersAndRewards()
 
-		const withdrawWithZeroAmount = staking.connect(signers[3]).withdraw(0)
-
-		await expect(withdrawWithZeroAmount).to.be.rejectedWith('Cannot withdraw 0')
+		const zeroWithdraw = staking.withdraw(0)
+		await expect(zeroWithdraw).to.be.revertedWithCustomError(staking, 'ZeroAmount')
 	})
 
 	it('decreases totalSupply on amount withdrawn', async function () {

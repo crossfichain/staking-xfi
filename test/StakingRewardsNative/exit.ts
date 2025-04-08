@@ -73,6 +73,6 @@ export const exit = function () {
 
 		const exit = staking.connect(signers[4]).exit()
 
-		await expect(exit).to.be.revertedWith('Cannot withdraw 0')
+		await expect(exit).to.be.revertedWithCustomError(staking, 'ZeroAmount')
 	})
 }

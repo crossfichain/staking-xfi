@@ -22,10 +22,10 @@ export const stake = function () {
 	})
 
 	it('amount must be greater than 0', async function () {
-		const { staking, signers } = await getStakingContractsWithStakersAndRewards()
+		const { staking } = await getStakingContractsWithStakersAndRewards()
 
-		const stakeWith0Amount = staking.connect(signers[1]).stake(0)
-		await expect(stakeWith0Amount).to.be.revertedWith('Cannot stake 0')
+		const zeroStake = staking.stake(0)
+		await expect(zeroStake).to.be.revertedWithCustomError(staking, 'ZeroAmount')
 	})
 
 	it('increases totalSupply on amount that was staked', async function () {

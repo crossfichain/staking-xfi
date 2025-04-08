@@ -93,12 +93,12 @@ export const notifyRewardAmount = function () {
 		const rewards = await ethers.provider.getBalance(staking)
 		let notify = staking.notifyRewardAmount(rewards * 2n)
 
-		await expect(notify).to.be.revertedWith('Provided reward too high')
+		await expect(notify).to.be.revertedWithCustomError(staking, 'RewardTooHigh')
 
 		// ?????
 		notify = staking.notifyRewardAmount(rewards + BigInt(1000000e18))
 
-		await expect(notify).to.be.revertedWith('Provided reward too high')
+		await expect(notify).to.be.revertedWithCustomError(staking, 'RewardTooHigh')
 	})
 
 	it('updates lastUpdateTime to current timestamp', async function () {

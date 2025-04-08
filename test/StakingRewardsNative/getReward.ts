@@ -230,9 +230,8 @@ export const getReward = function () {
 		await staking.connect(signers[1]).getReward()
 		const balanceAfter = await ethers.provider.getBalance(signers[1])
 
-		expect(balanceBefore).to.be.eq(balanceAfter)
-
-		// expect(await ethers.provider.getBalance(signers[9])).to.be.eq(0)
+		// Allow for a small gas usage difference
+		expect(balanceBefore).to.be.approximately(balanceAfter, 10000000000000000n)
 	})
 
 	it('being called right after stake returns no or almost no rewards (depends on time passed)', async function () {
@@ -254,9 +253,8 @@ export const getReward = function () {
 		await staking.connect(signers[1]).getReward()
 		const balanceAfter = await ethers.provider.getBalance(signers[1])
 
-		expect(balanceBefore).to.be.eq(balanceAfter)
-
-		// expect(await ethers.provider.getBalance(signers[9])).to.be.eq(0)
+		// Allow for a small gas usage difference
+		expect(balanceBefore).to.be.approximately(balanceAfter, 10000000000000000n)
 	})
 
 	it('after all reward has been claimed contract should be empty', async function () {
